@@ -1,2 +1,2 @@
-lisp: lisp.c prim.c lisp.h
-	cc -g -Wall -Wextra lisp.c prim.c -o lisp
+lisp: lisp.c prim.c mem.c lisp.h
+	cc -g -Wall -Wextra lisp.c prim.c mem.c -o lisp

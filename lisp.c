@@ -14,24 +14,38 @@ sexp_t *nil, *t, *dot;
 sexp_t *new_sexp(uint8_t type, uint64_t data)
 {
 	sexp_t *e;
-	e = malloc(sizeof(sexp_t));
+	e = gc_alloc(sizeof(sexp_t));
 	e->type = type;
 	e->data= data;
 	return e;
 }
 
-/* Environment */
+/*
+ * Environment
+ */
 
 env_t *new_env(env_t *par)
 {
 	env_t *env;
-	env = malloc(sizeof(env_t));
+	env = gc_alloc(sizeof(env_t));
+	env->type = ENV;
 	env->par = par;
 	env->first = NULL;
 	return env;
 }
 
-sexp_t *env_look_up(env_t *env, sexp_t *sym)	/* TODO: this is slow */
+void env_clear(env_t *env)
+{
+	struct binding *b, *next;
+	for (b = env->first; b; b = next) {
+		free(b->var);
+		next = b->next;
+		free(b);
+	}
+}
+
+/* TODO: this is slow */
+sexp_t *env_look_up(env_t *env, sexp_t *sym)
 {
 	struct binding *b;
 	for (b = env->first; b; b = b->next)
@@ -56,31 +70,34 @@ void env_set(env_t *env, char *var, sexp_t *val)
 {
 	struct binding *b;
 	for (b = env->first; b; b = b->next)
-		if (strcmp(var, b->var) == 0)
+		if (strcmp(var, b->var) == 0) {
 			b->val = val;
+			return;
+		}
 	if (env->par)
-		env_bind(env->par, var, val);
+		env_set(env->par, var, val);
 }
 
-/* String table */
+/*
+ * Symbol list
+ */
 
-int strtab_len;
-int strtab_max;
-char **stringtab;
+sexp_t *symlist;
 
-/* TODO: this is slow (and not really necessary anyways) */
-char *find_string(const char *s)
+/* TODO: this is slow */
+sexp_t *find_symbol(const char *s)
 {
-	int i;
-	for (i = 0; i < strtab_len; i++)
-		if (strcmp(s, stringtab[i]) == 0)
-			return stringtab[i];
-	strtab_len++;
-	if (strtab_len >= strtab_max) {
-		strtab_max *= 2;
-		stringtab = realloc(stringtab, strtab_max*sizeof(char*));
-	}
-	return stringtab[strtab_len-1] = strdup(s);
+	sexp_t *sym;
+	sexp_t *tmp;
+	for (sym = symlist; sym != nil; sym = cdr(sym))
+		if (strcmp(s, get_symname(car(sym))) == 0)
+			return car(sym);
+
+	tmp = new_sexp(SYM, make_cons(strdup(s), NULL));
+	gc_push(&tmp);
+	symlist = cons(tmp, symlist);
+	gc_pop();
+	return car(symlist);
 }
 
 /*
@@ -94,7 +111,7 @@ void print_atom(sexp_t *atm, FILE *out)
 	else if (atm == t)
 		fprintf(out, "t");
 	else
-		switch (atm->type) {
+		switch (type(atm)) {
 		case INT:
 			fprintf(out, "%d", get_int(atm));
 			break;
@@ -106,29 +123,31 @@ void print_atom(sexp_t *atm, FILE *out)
 			break;
 		case LAMBDA:
 			fprintf(out, "<#Lambda ");
-			print_sexp(car(get_l_code(atm)), out);
+			print_sexp(proc_params(atm), out);
 			putc(' ', out);
-			print_sexp(cdr(get_l_code(atm)), out);
+			print_sexp(proc_body(atm), out);
 			fprintf(out, ">");
 			break;
 		case MACRO:
 			fprintf(out, "<#Macro ");
-			print_sexp(car(get_l_code(atm)), out);
+			print_sexp(proc_params(atm), out);
 			putc(' ', out);
-			print_sexp(cdr(get_l_code(atm)), out);
+			print_sexp(proc_body(atm), out);
 			fprintf(out, ">");
 			break;
 		case PRIM:
-			fprintf(out, "<#Primitive %p>", get_proc(atm));
+			fprintf(out, "<#Primitive %p>", get_prim(atm));
 			break;
 		case SPEC:
-			fprintf(out, "<#Specialform %p>", get_proc(atm));
+			fprintf(out, "<#Specialform %p>", get_prim(atm));
 			break;
 		}
 }
 
 void print_sexp(sexp_t *exp, FILE *out)
 {
+	if (type(exp) == ENV)
+		fprintf(out, "<#Environment %p>", exp);
 	if (isatom(exp)) {
 		print_atom(exp, out);
 	} else {
@@ -217,16 +236,16 @@ sexp_t *read_atom(const char *buf)
 			}
 			s--;
 		} else
-			return symbol(buf);
+			return find_symbol(buf);
 	}
 	if (!havenum)
-		return symbol(buf);
+		return find_symbol(buf);
 	if (type == INT)
-		return new_sexp(INT, make_int(i*sign));
+		return int_(i*sign);
 	f = sign*(i+f);
 	while (exp--)
 		f = (expsign > 0) ? f*10.0 : f/10.0;
-	return new_sexp(FLOAT, make_float(f));
+	return float_(f);
 }
 
 sexp_t *read_sexp(FILE *in)
@@ -244,12 +263,16 @@ sexp_t *read_sexp(FILE *in)
 			return nil;
 		ungetc(c, in);
 		next = read_sexp(in);
+		gc_push(&next);
 		if (next == dot) {
 			fprintf(stderr, "error: 'dot' not allowed at "
 					"beginning of list\n");
+			gc_pop();
 			return NULL;
 		}
 		ret = last = cons(next, nil);
+		gc_pop();
+		gc_push(&ret);
 		while ((c = nextcharsp(in)) != ')') {
 			ungetc(c, in);
 			next = read_sexp(in);
@@ -258,8 +281,10 @@ sexp_t *read_sexp(FILE *in)
 				continue;
 			}
 			if (havedot == 0) {
+				gc_push(&next);
 				last->data = make_cons(car(last),
 						       cons(next, nil));
+				gc_pop();
 				last = cdr(last);
 			} else if (havedot == 1) {
 				last->data = make_cons(car(last), next);
@@ -267,9 +292,11 @@ sexp_t *read_sexp(FILE *in)
 			} else {
 				fprintf(stderr, "error: only one "
 				  "expression after 'dot' allowed\n");
+				gc_pop();
 				return NULL;
 			}
 		}
+		gc_pop();
 		return ret;
 	}
 
@@ -289,22 +316,38 @@ sexp_t *read_sexp(FILE *in)
 
 	if (c == '\'') {
 		next = read_sexp(in);
-		return cons(symbol("quote"), cons(next, nil));
+		gc_push(&next);
+		next = cons(next, nil);
+		next = cons(find_symbol("quote"), next);
+		gc_pop();
+		return next;
 	}
 
 	if (c == '`') {
 		next = read_sexp(in);
-		return cons(symbol("backquote"), cons(next, nil));
+		gc_push(&next);
+		next = cons(next, nil);
+		next = cons(find_symbol("backquote"), next);
+		gc_pop();
+		return next;
 	}
 
 	if (c == ',') {
 		if ((c = nextchar(in)) == '@') {
 			next = read_sexp(in);
-			return cons(symbol("unquote-splice"), cons(next, nil));
+			gc_push(&next);
+			next = cons(next, nil);
+			next = cons(find_symbol("unquote-splice"), next);
+			gc_pop();
+			return next;
 		}
 		ungetc(c, in);
 		next = read_sexp(in);
-		return cons(symbol("unquote"), cons(next, nil));
+		gc_push(&next);
+		next = cons(next, nil);
+		next = cons(find_symbol("unquote"), next);
+		gc_pop();
+		return next;
 	}
 
 	*s++ = c;
@@ -321,82 +364,87 @@ sexp_t *read_sexp(FILE *in)
  * Eval
  */
 
-sexp_t *apply_lambda(sexp_t *lambda, sexp_t *args, int ismacro)
+env_t *env_extend(env_t *par, sexp_t *params, sexp_t *args)
 {
 	env_t *env;
-	sexp_t *formals, *code, *ret;
 
-	formals = car(get_l_code(lambda));
-	env = new_env(get_l_env(lambda));
-
-	if (list_len(formals) >= 0 && list_len(formals) != list_len(args)) {
+	if (list_len(params) >= 0 && list_len(params) != list_len(args)) {
 		fprintf(stderr, "error: argument count\n");
 		return NULL;
 	}
-	if (iscons(formals)) {
-		for (; formals != nil && args != nil;
-		       formals = cdr(formals), args = cdr(args)) {
-			if (!issym(car(formals))) {
+
+	env = new_env(par);
+	gc_push(&env);
+	for (; params != nil; params = cdr(params), args = cdr(args))
+		if (iscons(params)) {
+			if (!issym(car(params))) {
 				fprintf(stdout, "error: symbol expected\n");
+				gc_pop();
 				return NULL;
 			}
-			env_bind(env, get_symname(car(formals)), car(args));
-			/* If not proper list, bind all remaining args
-			 * to the last cdr. */
-			if (!islist(cdr(formals))) {
-				if (!issym(cdr(formals))) {
-					fprintf(stdout, "error: symbol "
-					                "expected\n");
-					return NULL;
-				}
-				env_bind(env, get_symname(cdr(formals)),
-				         cdr(args));
-				break;
+			env_bind(env, get_symname(car(params)), car(args));
+		} else  {
+			if (!issym(params)) {
+				fprintf(stdout, "error: symbol expected\n");
+				gc_pop();
+				return NULL;
 			}
+			env_bind(env, get_symname(params), args);
+			break;
 		}
-	} else if (issym(formals)) {
-		env_bind(env, get_symname(formals), args);
-	} else if (!isnil(formals)) {
-		fprintf(stderr, "error: illegal formal parameters\n");
-		return NULL;
-	}
-
-	for (code = cdr(get_l_code(lambda)); code != nil; code = cdr(code)) {
-		ret = eval(car(code), env);
-		if (ismacro)
-			ret = eval(ret, env);
-	}
-	return ret;
+	gc_pop();
+	return env;
 }
 
 sexp_t *apply(sexp_t *proc, sexp_t *args, env_t *env)
 {
-	switch (proc->type) {
+	switch (type(proc)) {
 	case PRIM:
 	case SPEC:
-		return (get_proc(proc))(args, env);
+		return (get_prim(proc))(args, env);
 	case LAMBDA:
-		return apply_lambda(proc, args, 0);
 	case MACRO:
-		return apply_lambda(proc, args, 1);
+		env = env_extend(proc_env(proc), proc_params(proc), args);
+		gc_push(&env);
+		proc = evblock(proc_body(proc), env, type(proc) == MACRO);
+		gc_pop();
+		return proc;
 	default:
 		return NULL;
 	}
 }
 
+sexp_t *evblock(sexp_t *exp, env_t *env, int ismacro)
+{
+	sexp_t *ret = NULL;
+	gc_push(&ret);
+	for (; exp != nil; exp = cdr(exp)) {
+		ret = eval(car(exp), env);
+		if (ismacro)
+			ret = eval(ret, env);
+	}
+	gc_pop();
+	return ret;
+}
+
 sexp_t *evlis(sexp_t *args, env_t *env)
 {
-	sexp_t *first;
+	sexp_t *e1, *e2;
 	if (isnil(args))
 		return nil;
-	/* force evaluation order */
-	first = eval(car(args), env);
-	return cons(first, evlis(cdr(args), env));
+	e1 = eval(car(args), env);
+	gc_push(&e1);
+	e2 = evlis(cdr(args), env);
+	gc_push(&e2);
+	e1 = cons(e1, e2);
+	gc_pop();
+	gc_pop();
+	return e1;
 }
 
 sexp_t *eval(sexp_t *exp, env_t *env)
 {
-	switch (exp->type) {
+	switch (type(exp)) {
 	case NIL:
 	case INT:
 	case FLOAT:
@@ -404,37 +452,40 @@ sexp_t *eval(sexp_t *exp, env_t *env)
 	case SYM:
 		return env_look_up(env, exp);
 	case CONS: {
-		sexp_t *proc;
+		sexp_t *proc, *args;
 		if (list_len(exp) < 0) {
 			fprintf(stderr, "error: proper list expected\n");
 			return NULL;
 		}
 		proc = eval(car(exp), env);
-		if (!proc) {
-			fprintf(stderr, "error: not a procedure\n");
-			return NULL;
-		}
-		switch (proc->type) {
-		case PRIM:
-		case LAMBDA:
-			return apply(proc, evlis(cdr(exp), env), env);
-		case SPEC:
-		case MACRO:
-			return apply(proc, cdr(exp), env);
-		default:
-			return NULL;
-		}
+		gc_push(&proc);
+		args = (type(proc) == PRIM || type(proc) == LAMBDA) ?
+			evlis(cdr(exp), env) : cdr(exp);
+		gc_push(&args);
+		proc = apply(proc, args, env);
+		gc_pop();
+		gc_pop();
+		return proc;
 	}
 	default:
 		return NULL;
 	}
 }
 
+/*
+ * General stuff
+ */
+
 sexp_t *copy_list(sexp_t *l)
 {
+	sexp_t *e;
 	if (l == nil)
 		return nil;
-	return cons(car(l), copy_list(cdr(l)));
+	e = copy_list(cdr(l));
+	gc_push(&e);
+	e = cons(car(l), e);
+	gc_pop();
+	return e;
 }
 
 int list_len(sexp_t *e)
@@ -450,22 +501,19 @@ int list_len(sexp_t *e)
 	return i;
 }
 
-int init()
+int init(void)
 {
 	if (sizeof(nil->data) != 2*sizeof(void*)) {
 		fprintf(stderr, "Error: incompatible with this platform.\n");
 		return 1;
 	}
 
-	strtab_len = 0;
-	strtab_max = 4;
-	stringtab = malloc(strtab_max*sizeof(char*));
+	nil = new_sexp(NIL,0); gc_push(&nil);
+	t = new_sexp(NIL,0); gc_push(&t);
+	dot = new_sexp(NIL,0); gc_push(&dot);
+	symlist = nil; gc_push(&symlist);
+	toplevel = new_env(NULL); gc_push(&toplevel);
 
-	nil = new_sexp(NIL,0);
-	t = new_sexp(NIL,0);
-	dot = new_sexp(NIL,0);
-
-	toplevel = new_env(NULL);
 
 	env_bind(toplevel, "nil", nil);
 	env_bind(toplevel, "t", t);
@@ -511,37 +559,74 @@ int init()
 	return 0;
 }
 
+void clean_up(void)
+{
+	sexp_t *sym;
+
+//	print_sexpnl(symlist, stdout);
+//	gc_mark();
+//	gc_sweep();
+//	gc_dump();
+//	printf(":::::::\n");
+//	gc_dump_stack();
+
+	gc_pop();
+	gc_pop();
+	gc_pop();
+	gc_pop();
+	gc_pop();
+
+	for (sym = symlist; sym != nil; sym = cdr(sym))
+		free(get_symname(car(sym)));
+
+	gc_sweep();
+}
+
 void dofile(const char *path)
 {
 	FILE *input;
-	sexp_t *e;
+	sexp_t *e = NULL;
 	if ((input = fopen(path, "r")) == NULL) {
 		fprintf(stderr, "error: could not open %s\n", path);
 		return;
 	}
-	while ((e = read_sexp(input)))
+	gc_push(&e);
+	while ((e = read_sexp(input))) {
 		e = eval(e, toplevel);
+		e = NULL;
+	}
+	gc_pop();
 	fclose(input);
 }
 
+/* normal repl */
 void repl()
 {
-	sexp_t *e;
+	sexp_t *e = NULL;
+	gc_push(&e);
 	while ((e = read_sexp(stdin))) {
 		e = eval(e, toplevel);
 		if (e)
 			print_sexpnl(e, stdout);
+		e = NULL;
 	}
+	gc_pop();
 }
 
+/* evalquote repl */
 void repl_eq()
 {
-	sexp_t *e1, *e2;
+	sexp_t *e1 = NULL, *e2 = NULL;
+	gc_push(&e1);
+	gc_push(&e2);
 	while ((e1 = read_sexp(stdin)) && (e2 = read_sexp(stdin))) {
 		e1 = apply(eval(e1, toplevel), e2, toplevel);
 		if (e1)
 			print_sexpnl(e1, stdout);
+		e1 = e2 = NULL;
 	}
+	gc_pop();
+	gc_pop();
 }
 
 int main(int argc, char *argv[])
@@ -555,6 +640,7 @@ int main(int argc, char *argv[])
 		repl_eq();
 	else
 		repl();
+	clean_up();
 
 	return 0;
 }

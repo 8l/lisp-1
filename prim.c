@@ -1,6 +1,10 @@
 #include <string.h>
 #include "lisp.h"
 
+/*
+ * Primitive procedures
+ */
+
 sexp_t *prim_atom(sexp_t *args)
 {
 	if (list_len(args) != 1) {
@@ -27,8 +31,8 @@ sexp_t *prim_eq(sexp_t *args)
 {
 	if (list_len(args) < 2)
 		return t;
-	if (car(args)->type == NIL || car(cdr(args))->type == NIL)
-		return car(args) == car(cdr(args)) ? t : nil;
+	if (type(car(args)) == NIL || type(car(cdr(args))) == NIL)
+		return (car(args) == car(cdr(args))) ? t : nil;
 	if ((car(args)->data == car(cdr(args))->data) &&
 	    (prim_eq(cdr(args)) == t))
 		return t;
@@ -90,7 +94,9 @@ sexp_t *prim_append(sexp_t *args)
 	}
 	for (ret = lst = copy_list(car(args)); cdr(lst) != nil; lst = cdr(lst))
 		;
+	gc_push(&ret);
 	lst->data = make_cons(car(lst), prim_append(cdr(args)));
+	gc_pop();
 	return ret;
 }
 
@@ -118,33 +124,39 @@ sexp_t *prim_progn(sexp_t *args)
 	return car(args);
 }
 
-sexp_t *prim_add(sexp_t *args)
-{
-	sexp_t *n1, *n2;
-	if (list_len(args) == 0)
-		return int_(0);
-	n1 = car(args);
-	if (!isnum(n1)) {
-		fprintf(stderr, "error: number expected\n");
-		return NULL;
+#define addmul(F,OP,ID) \
+	sexp_t *n1, *n2; \
+	if (list_len(args) == 0) \
+		return int_(ID); \
+	n1 = car(args); \
+	if (!isnum(n1)) { \
+		fprintf(stderr, "error: number expected\n"); \
+		return NULL; \
+	} \
+	if (list_len(args) == 1) \
+		return new_sexp(type(n1), n1->data); \
+	n2 = F(cdr(args)); \
+	if (!n2) \
+		return NULL; \
+	gc_push(&n2); \
+	if (isint(n1)) { \
+		n2 = isint(n2) ? \
+			int_(get_int(n1) OP get_int(n2)) : \
+			float_(get_int(n1) OP get_float(n2)); \
+		gc_pop(); \
+		return n2; \
+	} else { \
+		/* this is necessary because of sequence points */ \
+		double f = get_float(n2); \
+		n2 = isint(n2) ?  \
+			float_(get_float(n1) OP get_int(n2)) : \
+			float_(get_float(n1) OP f); \
+		gc_pop(); \
+		return n2; \
 	}
-	if (list_len(args) == 1)
-		return new_sexp(n1->type, n1->data);
-	n2 = prim_add(cdr(args));
-	if (!n2)
-		return NULL;
-	if (isint(n1))
-		return isint(n2) ?
-			int_(get_int(n1) + get_int(n2)) :
-			float_(get_int(n1) + get_float(n2));
-	else {
-		/* this is necessary because of to sequence points */
-		double f = get_float(n2);
-		return isint(n2) ? 
-			float_(get_float(n1) + get_int(n2)) :
-			float_(get_float(n1) + f);
-	}
-}
+sexp_t *prim_add(sexp_t *args) { addmul(prim_add, +, 0); }
+sexp_t *prim_mul(sexp_t *args) { addmul(prim_mul, *, 1); }
+#undef addmul
 
 sexp_t *prim_sub(sexp_t *args)
 {
@@ -163,38 +175,15 @@ sexp_t *prim_sub(sexp_t *args)
 	n2 = prim_add(cdr(args));
 	if (!n2)
 		return NULL;
+	gc_push(&n2);
 	n2->data = isint(n2) ?
 		make_int(-get_int(n2)) :
 		make_float(-get_float(n2));
-	return prim_add(cons(n1, cons(n2, nil)));
-}
-
-sexp_t *prim_mul(sexp_t *args)
-{
-	sexp_t *n1, *n2;
-	if (list_len(args) == 0)
-		return int_(1);
-	n1 = car(args);
-	if (!isnum(n1)) {
-		fprintf(stderr, "error: number expected\n");
-		return NULL;
-	}
-	if (list_len(args) == 1)
-		return new_sexp(n1->type, n1->data);
-	n2 = prim_mul(cdr(args));
-	if (!n2)
-		return NULL;
-	if (isint(n1))
-		return isint(n2) ?
-			int_(get_int(n1) * get_int(n2)) :
-			float_(get_int(n1) * get_float(n2));
-	else {
-		/* this is necessary because of to sequence points */
-		double f = get_float(n2);
-		return isint(n2) ? 
-			float_(get_float(n1) * get_int(n2)) :
-			float_(get_float(n1) * f);
-	}
+	n2 = cons(n2, nil);
+	n2 = cons(n1, n2);
+	n2 = prim_add(n2);
+	gc_pop();
+	return n2;
 }
 
 /* TODO; return ints when possible */
@@ -216,16 +205,21 @@ sexp_t *prim_div(sexp_t *args)
 	n2 = prim_mul(cdr(args));
 	if (!n2)
 		return NULL;
+	gc_push(&n2);
 	n2->data = isint(n2) ?
 		make_float(1.0/get_int(n2)) :
 		make_float(1.0/get_float(n2));
 	n2->type = FLOAT;
-	return prim_mul(cons(n1, cons(n2, nil)));
+	n2 = cons(n2, nil);
+	n2 = cons(n1, n2);
+	n2 = prim_mul(n2);
+	gc_pop();
+	return n2;
 }
 
-#define num_cmp(TEST) \
+#define num_cmp(F,OP) \
 	sexp_t *n1, *n2;\
-	int eq;\
+	int test;\
 	if (list_len(args) == 0)\
 		return t;\
 	n1 = car(args);\
@@ -241,43 +235,24 @@ sexp_t *prim_div(sexp_t *args)
 		return NULL;\
 	}\
 	if (isint(n1))\
-		eq = isint(n2) ?\
-			(get_int(n1) TEST get_int(n2)) :\
-			(get_int(n1) TEST get_float(n2));\
+		test = isint(n2) ?\
+			(get_int(n1) OP get_int(n2)) :\
+			(get_int(n1) OP get_float(n2));\
 	else {\
 		/* this is necessary because of to sequence points */\
 		double f = get_float(n2);\
-		eq = isint(n2) ?\
-			(get_float(n1) TEST get_int(n2)) :\
-			(get_float(n1) TEST f);\
+		test = isint(n2) ?\
+			(get_float(n1) OP get_int(n2)) :\
+			(get_float(n1) OP f);\
 	}\
-	if (!eq)\
+	if (!test)\
 		return nil;\
-	return prim_numeq(cdr(args));
-sexp_t *prim_numeq(sexp_t *args)
-{
-	num_cmp(==);
-}
-
-sexp_t *prim_numlt(sexp_t *args)
-{
-	num_cmp(<);
-}
-
-sexp_t *prim_numgt(sexp_t *args)
-{
-	num_cmp(>);
-}
-
-sexp_t *prim_numle(sexp_t *args)
-{
-	num_cmp(<=);
-}
-
-sexp_t *prim_numge(sexp_t *args)
-{
-	num_cmp(>=);
-}
+	return F(cdr(args));
+sexp_t *prim_numeq(sexp_t *args) { num_cmp(prim_numeq, ==); }
+sexp_t *prim_numlt(sexp_t *args) { num_cmp(prim_numlt, <); }
+sexp_t *prim_numgt(sexp_t *args) { num_cmp(prim_numgt, >); }
+sexp_t *prim_numle(sexp_t *args) { num_cmp(prim_numle, <=); }
+sexp_t *prim_numge(sexp_t *args) { num_cmp(prim_numge, >=); }
 #undef num_cmp
 
 sexp_t *prim_display(sexp_t *args)
@@ -307,7 +282,9 @@ sexp_t *prim_read()
 	return read_sexp(stdin);
 }
 
-
+/*
+ * Special forms
+ */
 
 sexp_t *spec_quote(sexp_t *args)
 {
@@ -331,13 +308,20 @@ sexp_t *spec_backquote(sexp_t *arg, env_t *env)
 			         "unquote-splice") == 0) {
 				sexp_t *next = cdr(list);
 				sexp_t *new = eval(car(cdr(car(list))), env);
-				if (prev == nil)
-					return prim_append(cons(new,
-					                      cons(next, nil)));
-				else
-					prev->data = make_cons(car(prev),
-					  prim_append(cons(new,
-					                   cons(next, nil))));
+				if (prev == nil) {
+					gc_push(&next);
+					next = cons(next, nil);
+					next = cons(new, next);
+					next = prim_append(next);
+					gc_pop();
+					return next;
+				} else {
+					gc_push(&next);
+					next = cons(next, nil);
+					next = cons(new, next);
+					prev->data = make_cons(car(prev), next);
+					gc_pop();
+				}
 			}
 		}
 	return arg;
@@ -434,7 +418,9 @@ sexp_t *spec_setcar(sexp_t *args, env_t *env)
 		fprintf(stderr, "error: cons expected\n");
 		return NULL;
 	}
+	gc_push(&cs);
 	cs->data = make_cons(eval(car(cdr(args)), env), cdr(cs));
+	gc_pop();
 	return NULL;
 }
 
@@ -450,6 +436,8 @@ sexp_t *spec_setcdr(sexp_t *args, env_t *env)
 		fprintf(stderr, "error: cons expected\n");
 		return NULL;
 	}
+	gc_push(&cs);
 	cs->data = make_cons(car(cs), eval(car(cdr(args)), env));
+	gc_pop();
 	return NULL;
 }

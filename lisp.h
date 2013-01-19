@@ -4,15 +4,16 @@
 #include <stdint.h>
 #include <stdio.h>
 
-#define NIL	0
-#define INT	1
-#define FLOAT	2
-#define SYM	3
-#define CONS	4
-#define LAMBDA	5
-#define MACRO	6
-#define PRIM	7
-#define SPEC	8
+#define NIL	0x0
+#define INT	0x1
+#define FLOAT	0x2
+#define SYM	0x3
+#define CONS	0x4
+#define LAMBDA	0x5
+#define MACRO	0x6
+#define PRIM	0x7
+#define SPEC	0x8
+#define ENV	0x9
 
 typedef struct sexp sexp_t;
 struct sexp {
@@ -22,6 +23,7 @@ struct sexp {
 
 typedef struct env env_t;
 struct env {
+	uint8_t type;
 	env_t *par;
 	struct binding {
 		char *var;
@@ -30,33 +32,42 @@ struct env {
 	} *first;
 };
 
-union float_int_conv {
-	double f;
-	uint64_t i;
-};
+union float_int_conv { double f; uint64_t i; };
 extern union float_int_conv float_int;
 extern sexp_t *nil, *t, *dot;
 
-sexp_t *copy_list(sexp_t *l);
-int list_len(sexp_t *e);
-
 env_t *toplevel;
+
+void    gc_dump(void);
+void    gc_dump_stack(void);
+void   *gc_alloc(size_t size);
+void    gc_push(void *obj);
+void    gc_pop(void);
+void    gc_mark(void);
+void    gc_sweep(void);
+
+sexp_t *copy_list(sexp_t *l);
+int     list_len(sexp_t *e);
+
 sexp_t *new_sexp(uint8_t type, uint64_t data);
 
-env_t *new_env(env_t *par);
+env_t  *new_env(env_t *par);
+env_t  *env_extend(env_t *par, sexp_t *params, sexp_t *args);
+void    env_clear(env_t *env);
 sexp_t *env_look_up(env_t *env, sexp_t *sym);
-void env_bind(env_t *env, char *var, sexp_t *val);
-void env_set(env_t *env, char *var, sexp_t *val);
+void    env_bind(env_t *env, char *var, sexp_t *val);
+void    env_set(env_t *env, char *var, sexp_t *val);
 
-char *find_string(const char *s);
+sexp_t *find_symbol(const char *s);
 
-void print_sexp(sexp_t *exp, FILE *out);
+void    print_sexp(sexp_t *exp, FILE *out);
 #define print_sexpnl(exp, out)\
 	(print_sexp(exp,out), putc('\n',out))
 sexp_t *read_sexp(FILE *in);
 
 sexp_t *apply(sexp_t *proc, sexp_t *args, env_t *env);
 sexp_t *evlis(sexp_t *args, env_t *env);
+sexp_t *evblock(sexp_t *exp, env_t *env, int ismacro);
 sexp_t *eval(sexp_t *exp, env_t *env);
 
 /*
@@ -100,15 +111,17 @@ sexp_t *spec_set(sexp_t *args, env_t *env);
 sexp_t *spec_setcar(sexp_t *args, env_t *env);
 sexp_t *spec_setcdr(sexp_t *args, env_t *env);
 
-#define isint(X)	((X)->type == INT)
-#define isfloat(X)	((X)->type == FLOAT)
+#define type(X)		(((sexp_t*)(X))->type & 0x7F)
+#define marked(X)	(((sexp_t*)(X))->type & 0x80)
+#define isint(X)	(type(X) == INT)
+#define isfloat(X)	(type(X) == FLOAT)
 #define isnum(X)	(isint(X) || isfloat(X))
-#define issym(X)	((X)->type == SYM)
-#define islambda(X)	((X)->type == LAMBDA)
-#define isprim(X)	((X)->type == PRIM)
-#define isspec(X)	((X)->type == SPEC)
-#define isatom(X)	((X)->type != CONS)
-#define iscons(X)	((X)->type == CONS)
+#define issym(X)	(type(X) == SYM)
+#define islambda(X)	(type(X) == LAMBDA)
+#define isprim(X)	(type(X) == PRIM)
+#define isspec(X)	(type(X) == SPEC)
+#define isatom(X)	(type(X) != CONS)
+#define iscons(X)	(type(X) == CONS)
 #define isnil(X)	((X) == nil)
 #define islist(X)	(iscons(X) || isnil(X))
 
@@ -121,7 +134,6 @@ sexp_t *spec_setcdr(sexp_t *args, env_t *env);
 #define car(a)		((sexp_t*)(get_car((a)->data)))
 #define cdr(a)		((sexp_t*)(get_cdr((a)->data)))
 
-#define symbol(s)	(new_sexp(SYM, make_cons(find_string((s)), NULL)))
 #define get_symname(s)	((char*)car(s))
 
 #define make_int(a)	((uint64_t) (a))
@@ -134,10 +146,11 @@ sexp_t *spec_setcdr(sexp_t *args, env_t *env);
 
 #define prim(a)		(new_sexp(PRIM, make_cons((a), NULL)))
 #define spec(a)		(new_sexp(SPEC, make_cons((a), NULL)))
-#define lambda(a,b)	(new_sexp(LAMBDA, make_cons((a), (b))))
-#define macro(a,b)	(new_sexp(MACRO, make_cons((a), (b))))
-#define get_l_code(a)	(car(a))
-#define get_l_env(a)	((env_t*)cdr(a))
-#define get_proc(a)	((sexp_t *(*)())car(a))
+#define lambda(a,env)	(new_sexp(LAMBDA, make_cons((a), (env))))
+#define macro(a,env)	(new_sexp(MACRO, make_cons((a), (env))))
+#define proc_params(a)	(car(car(a)))
+#define proc_body(a)	(cdr(car(a)))
+#define proc_env(a)	((env_t*)cdr(a))
+#define get_prim(a)	((sexp_t *(*)())car(a))
 
 #endif
