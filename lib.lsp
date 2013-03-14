@@ -1,3 +1,16 @@
+(label caar (λ (x) (car (car x))))
+(label cddr (λ (x) (cdr (cdr x))))
+(label cadr (λ (x) (car (cdr x))))
+(label cdar (λ (x) (cdr (car x))))
+(label caaar (λ (x) (car (car (car x)))))
+(label cddar (λ (x) (cdr (cdr (car x)))))
+(label cadar (λ (x) (car (cdr (car x)))))
+(label cdaar (λ (x) (cdr (car (car x)))))
+(label caadr (λ (x) (car (car (cdr x)))))
+(label cdddr (λ (x) (cdr (cdr (cdr x)))))
+(label caddr (λ (x) (car (cdr (cdr x)))))
+(label cdadr (λ (x) (cdr (car (cdr x)))))
+
 (label null
   (λ (x) (eq x nil)))
 
@@ -8,17 +21,18 @@
            (cons (f (car lst))
                  (map f (cdr lst)))))))
 
-(label let (macro (vars . body)
-  `(,`(λ ,(map (λ (x) (car x)) vars)
-         ,@body) ,@(map (λ (x) (car (cdr x))) vars))))
+(label let (μ (vars . body)
+  `((λ ,(map car vars)
+      ,@body)
+    ,@(map cadr vars))))
 
 (label defun
-  (macro (name args . exp)
-    `(label ,name ,`(λ ,args ,@exp))))
+  (μ (name args . exp)
+    `(label ,name (λ ,args ,@exp))))
 
 (label defmacro
-  (macro (name args . exp)
-    `(label ,name ,`(macro ,args ,@exp))))
+  (μ (name args . exp)
+    `(label ,name (μ ,args ,@exp))))
 
 (label Y
   (λ (f)

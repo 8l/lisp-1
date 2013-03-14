@@ -15,10 +15,18 @@
 #define SPEC	0x8
 #define ENV	0x9
 
+#ifdef BIT64
+	#define DATAT	__uint128_t
+	#define PTRT	uint64_t
+#else
+	#define DATAT	uint64_t
+	#define PTRT	uint32_t
+#endif
+
 typedef struct sexp sexp_t;
 struct sexp {
 	uint8_t type;
-	uint64_t data;
+	DATAT data;
 };
 
 typedef struct env env_t;
@@ -31,6 +39,8 @@ struct env {
 		struct binding *next;
 	} *first;
 };
+
+void print128(DATAT d);
 
 union float_int_conv { double f; uint64_t i; };
 extern union float_int_conv float_int;
@@ -49,7 +59,7 @@ void    gc_sweep(void);
 sexp_t *copy_list(sexp_t *l);
 int     list_len(sexp_t *e);
 
-sexp_t *new_sexp(uint8_t type, uint64_t data);
+sexp_t *new_sexp(uint8_t type, DATAT data);
 
 env_t  *new_env(env_t *par);
 env_t  *env_extend(env_t *par, sexp_t *params, sexp_t *args);
@@ -125,18 +135,17 @@ sexp_t *spec_setcdr(sexp_t *args, env_t *env);
 #define isnil(X)	((X) == nil)
 #define islist(X)	(iscons(X) || isnil(X))
 
-#define make_cons(a, b)	(((uint64_t) ((uint32_t)(b)) << sizeof(void*)*8) |\
-				(uint32_t)(a))
+#define make_cons(a, b)	(((DATAT) ((PTRT)(b)) << sizeof(void*)*8) | (PTRT)(a))
 #define cons(a, b)	(new_sexp(CONS, make_cons((a), (b))))
 
-#define get_car(b)	((void*)((uint32_t)(b)))
-#define get_cdr(a)	((void*)((uint32_t)((a) >> sizeof(void*)*8)))
+#define get_car(b)	((void*)((PTRT)(b)))
+#define get_cdr(a)	((void*)((PTRT)((a) >> sizeof(void*)*8)))
 #define car(a)		((sexp_t*)(get_car((a)->data)))
 #define cdr(a)		((sexp_t*)(get_cdr((a)->data)))
 
 #define get_symname(s)	((char*)car(s))
 
-#define make_int(a)	((uint64_t) (a))
+#define make_int(a)	((DATAT) (a))
 #define get_int(a)	((int32_t) (a)->data)
 #define int_(a)		(new_sexp(INT, make_int(a)))
 

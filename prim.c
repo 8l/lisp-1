@@ -291,40 +291,48 @@ sexp_t *spec_quote(sexp_t *args)
 	return car(args);
 }
 
-sexp_t *spec_backquote(sexp_t *arg, env_t *env)
+sexp_t *backquote_recur(sexp_t *arg, env_t *env)
 {
-	sexp_t *list, *prev;
-	arg = car(arg);
+	sexp_t *head, *tail;
 	if (isatom(arg))
 		return arg;
-	/* what a mess */
-	for (prev = nil, list = arg; list != nil; prev = list, list = cdr(list))
-		if (iscons(car(list)) && issym(car(car(list)))) {
-			if (strcmp(get_symname(car(car(list))), "unquote") == 0)
-				list->data = make_cons(
-					eval(car(cdr(car(list))), env),
-					          cdr(list));
-			else if (strcmp(get_symname(car(car(list))),
-			         "unquote-splice") == 0) {
-				sexp_t *next = cdr(list);
-				sexp_t *new = eval(car(cdr(car(list))), env);
-				if (prev == nil) {
-					gc_push(&next);
-					next = cons(next, nil);
-					next = cons(new, next);
-					next = prim_append(next);
-					gc_pop();
-					return next;
-				} else {
-					gc_push(&next);
-					next = cons(next, nil);
-					next = cons(new, next);
-					prev->data = make_cons(car(prev), next);
-					gc_pop();
-				}
-			}
+	if (iscons(car(arg)) && issym(car(car(arg)))) {
+		if (strcmp(get_symname(car(car(arg))), "unquote") == 0) {
+			head = eval(car(cdr(car(arg))), env);
+			gc_push(&head);
+			tail = backquote_recur(cdr(arg), env);
+			gc_push(&tail);
+			tail = cons(head, tail);
+			gc_pop();
+			gc_pop();
+			return tail;
 		}
-	return arg;
+		if (strcmp(get_symname(car(car(arg))), "unquote-splice") == 0) {
+			head = eval(car(cdr(car(arg))), env);
+			gc_push(&head);
+			tail = backquote_recur(cdr(arg), env);
+			gc_push(&tail);
+			tail = cons(tail, nil);
+			tail = cons(head, tail);
+			tail = prim_append(tail);
+			gc_pop();
+			gc_pop();
+			return tail;
+		}
+	}
+	head = backquote_recur(car(arg), env);
+	gc_push(&head);
+	tail = backquote_recur(cdr(arg), env);
+	gc_push(&tail);
+	tail = cons(head, tail);
+	gc_pop();
+	gc_pop();
+	return tail;
+}
+
+sexp_t *spec_backquote(sexp_t *arg, env_t *env)
+{
+	return backquote_recur(car(arg), env);
 }
 
 sexp_t *spec_cond(sexp_t *args, env_t *env)

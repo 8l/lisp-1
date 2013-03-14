@@ -11,7 +11,8 @@ union float_int_conv float_int;
 env_t *toplevel;
 sexp_t *nil, *t, *dot;
 
-sexp_t *new_sexp(uint8_t type, uint64_t data)
+//sexp_t *new_sexp(uint8_t type, uint64_t data)
+sexp_t *new_sexp(uint8_t type, DATAT data)
 {
 	sexp_t *e;
 	e = gc_alloc(sizeof(sexp_t));
@@ -174,6 +175,10 @@ int nextchar(FILE *in)
 {
 	int c;
 	c = getc(in);
+	if (c == ';') {
+		while ((c = getc(in)) != '\n');
+		c = nextchar(in);
+	}
 	if (isspace(c))
 		c = ' ';
 	return c;
@@ -503,7 +508,8 @@ int list_len(sexp_t *e)
 
 int init(void)
 {
-	if (sizeof(nil->data) != 2*sizeof(void*)) {
+	if (sizeof(nil->data) != 2*sizeof(void*) ||
+	    sizeof(PTRT) != sizeof(void*)) {
 		fprintf(stderr, "Error: incompatible with this platform.\n");
 		return 1;
 	}
@@ -551,6 +557,7 @@ int init(void)
 	env_bind(toplevel, "lambda", spec(spec_lambda));
 	env_bind(toplevel, "λ", spec(spec_lambda));
 	env_bind(toplevel, "macro", spec(spec_macro));
+	env_bind(toplevel, "μ", spec(spec_macro));
 	env_bind(toplevel, "label", spec(spec_label));
 	env_bind(toplevel, "set", spec(spec_set));
 	env_bind(toplevel, "setcar", spec(spec_setcar));
@@ -563,18 +570,11 @@ void clean_up(void)
 {
 	sexp_t *sym;
 
-//	print_sexpnl(symlist, stdout);
-//	gc_mark();
-//	gc_sweep();
-//	gc_dump();
-//	printf(":::::::\n");
-//	gc_dump_stack();
-
-	gc_pop();
-	gc_pop();
-	gc_pop();
-	gc_pop();
-	gc_pop();
+	gc_pop();	/* toplevel */
+	gc_pop();	/* symlist */
+	gc_pop();	/* dot */
+	gc_pop();	/* t */
+	gc_pop();	/* nil */
 
 	for (sym = symlist; sym != nil; sym = cdr(sym))
 		free(get_symname(car(sym)));
